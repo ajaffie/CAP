@@ -1,4 +1,4 @@
-﻿// Copyright (c) .NET Core Community. All rights reserved.
+// Copyright (c) .NET Core Community. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
 using System;
@@ -46,34 +46,62 @@ namespace DotNetCore.CAP.Kafka
 
         public void Listening(TimeSpan timeout, CancellationToken cancellationToken)
         {
-            Connect();
-
-            while (true)
+            try
             {
-                var consumerResult = _consumerClient.Consume(cancellationToken);
-
-                if (consumerResult.IsPartitionEOF || consumerResult.Value == null) continue;
-
-                var headers = new Dictionary<string, string>(consumerResult.Headers.Count);
-                foreach (var header in consumerResult.Headers)
+                Connect();
+                while (true)
                 {
-                    var val = header.GetValueBytes();
-                    headers.Add(header.Key, val != null ? Encoding.UTF8.GetString(val) : null);
-                }
-                headers.Add(Messages.Headers.Group, _groupId);
+                    CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken,
+                        new CancellationTokenSource(timeout).Token);
 
-                if (_kafkaOptions.CustomHeaders != null)
-                {
-                    var customHeaders = _kafkaOptions.CustomHeaders(consumerResult);
-                    foreach (var customHeader in customHeaders)
+                    ConsumeResult<string, byte[]> consumerResult;
+                    try
                     {
-                        headers.Add(customHeader.Key, customHeader.Value);
+                        consumerResult = _consumerClient.Consume(cts.Token);
                     }
+                    catch (OperationCanceledException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+
+                        // Timed out.
+                        continue;
+                    }
+
+                    if (consumerResult.IsPartitionEOF || consumerResult.Value == null) continue;
+
+                    var headers = new Dictionary<string, string>(consumerResult.Headers.Count);
+                    foreach (var header in consumerResult.Headers)
+                    {
+                        var val = header.GetValueBytes();
+                        headers.Add(header.Key, val != null ? Encoding.UTF8.GetString(val) : null);
+                    }
+
+                    headers.Add(Messages.Headers.Group, _groupId);
+
+                    if (_kafkaOptions.CustomHeaders != null)
+                    {
+                        var customHeaders = _kafkaOptions.CustomHeaders(consumerResult);
+                        foreach (var customHeader in customHeaders)
+                        {
+                            headers.Add(customHeader.Key, customHeader.Value);
+                        }
+                    }
+
+                    var message = new TransportMessage(headers, consumerResult.Value);
+
+                    OnMessageReceived?.Invoke(consumerResult, message);
                 }
-
-                var message = new TransportMessage(headers, consumerResult.Value);
-
-                OnMessageReceived?.Invoke(consumerResult, message);
+            }
+            finally
+            {
+                OnLog?.Invoke(null, new LogMessageEventArgs
+                {
+                    LogType = MqLogType.ServerConnError,
+                    Reason = "Kafka consumer exiting Listening method.",
+                });
             }
             // ReSharper disable once FunctionNeverReturns
         }
@@ -125,8 +153,8 @@ namespace DotNetCore.CAP.Kafka
         {
             var logArgs = new LogMessageEventArgs
             {
-                LogType = MqLogType.ServerConnError,
-                Reason = $"An error occurred during connect kafka --> {e.Reason}"
+                LogType = MqLogType.ConsumeError,
+                Reason = $"An error (code {e.Code.ToString()}) occurred during connect kafka --> {e.Reason}"
             };
             OnLog?.Invoke(null, logArgs);
         }
